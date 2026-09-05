@@ -2,6 +2,8 @@
 
 Track your ChatGPT account's remaining Codex allowance (5-hour and weekly) from the terminal, macOS menu bar, or an optional desktop widget.
 
+<img width="3456" height="2234" alt="Screenshot 2026-09-05 at 21 58 09" src="https://github.com/user-attachments/assets/53df832d-032a-45e3-8324-810858a60b65" />
+
 ## Setup
 
 Requires Codex CLI and an authenticated account:
