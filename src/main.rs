@@ -147,6 +147,25 @@ where
     format!("{label}: {remaining}; resets {reset}")
 }
 
+fn menu_bar_snapshot(bucket: &Value) -> Value {
+    let five_hour = find_window(bucket, FIVE_HOUR_MINUTES);
+    let weekly = find_window(bucket, WEEKLY_MINUTES);
+    let percent = |window: Option<&Value>| {
+        window
+            .and_then(|value| value.get("usedPercent"))
+            .and_then(Value::as_f64)
+            .map(|used| format!("{:.0}%", (100.0 - used).clamp(0.0, 100.0)))
+            .unwrap_or_else(|| "—".into())
+    };
+    json!({
+        "title": format!("AI 5h {} · W {}", percent(five_hour), percent(weekly)),
+        "details": [
+            format_window(five_hour, "5-hour", &Local),
+            format_window(weekly, "Weekly", &Local),
+        ],
+    })
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let result = fetch_rate_limits().await?;
@@ -158,6 +177,10 @@ async fn main() -> Result<()> {
     let bucket = codex_bucket(&result).context(
         "No Codex quota returned. Check `codex login status`; use --json to inspect all buckets.",
     )?;
+    if std::env::args().any(|arg| arg == "--menu-bar-json") {
+        println!("{}", menu_bar_snapshot(bucket));
+        return Ok(());
+    }
     for (minutes, label) in [(FIVE_HOUR_MINUTES, "5-hour"), (WEEKLY_MINUTES, "Weekly")] {
         let window = find_window(bucket, minutes);
         println!("{}", format_window(window, label, &Local));
@@ -169,6 +192,36 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn menu_bar_shows_remaining_usage_and_matches_cli_details() {
+        let bucket = json!({
+            "primary": {"windowDurationMins": 10080, "usedPercent": 110},
+            "secondary": {"windowDurationMins": 300, "usedPercent": 12.34}
+        });
+        let snapshot = menu_bar_snapshot(&bucket);
+        assert_eq!(snapshot["title"], "AI 5h 88% · W 0%");
+        assert_eq!(
+            snapshot["details"][0],
+            format_window(find_window(&bucket, FIVE_HOUR_MINUTES), "5-hour", &Local)
+        );
+        assert_eq!(
+            snapshot["details"][1],
+            format_window(find_window(&bucket, WEEKLY_MINUTES), "Weekly", &Local)
+        );
+    }
+
+    #[test]
+    fn menu_bar_does_not_treat_missing_usage_as_unused() {
+        for bucket in [
+            json!({}),
+            json!({"primary": {"windowDurationMins": 300, "usedPercent": null}}),
+        ] {
+            assert_eq!(menu_bar_snapshot(&bucket)["title"], "AI 5h — · W —");
+        }
+        let bucket = json!({"primary": {"windowDurationMins": 300, "usedPercent": -10}});
+        assert_eq!(menu_bar_snapshot(&bucket)["title"], "AI 5h 100% · W —");
+    }
 
     #[test]
     fn named_codex_bucket_takes_precedence_over_legacy_bucket() {
