@@ -4,23 +4,37 @@ import WidgetKit
 #endif
 
 enum UsageReader {
+    static func launchEnvironment(
+        _ inherited: [String: String], recordedPath: String?,
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+    ) -> [String: String] {
+        var environment = inherited
+        // Finder does not inherit the terminal's PATH. Release builds discover
+        // Codex on the recipient's Mac instead of embedding the builder's path.
+        let searchPath = ["/opt/homebrew/bin", "/usr/local/bin", inherited["PATH"] ?? "/usr/bin:/bin"]
+            .joined(separator: ":")
+        environment["PATH"] = searchPath
+        if environment["CODEX_BIN"] == nil {
+            let hint = recordedPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let hint, !hint.isEmpty, isExecutable(hint) {
+                environment["CODEX_BIN"] = hint
+            } else {
+                environment["CODEX_BIN"] = searchPath.split(separator: ":")
+                    .map { "\($0)/codex" }.first(where: isExecutable)
+            }
+        }
+        return environment
+    }
+
     static func read() throws -> UsageSnapshot {
         let process = Process()
         process.executableURL = Bundle.main.executableURL?
             .deletingLastPathComponent().appendingPathComponent("ai-usage")
         process.arguments = ["--menu-bar-json"]
 
-        // Finder does not inherit the terminal's PATH. The build records the
-        // resolved Codex executable; CODEX_BIN remains available as an override.
-        var environment = ProcessInfo.processInfo.environment
-        if environment["CODEX_BIN"] == nil,
-           let path = Bundle.main.url(forResource: "codex-path", withExtension: "txt"),
-           let executable = try? String(contentsOf: path, encoding: .utf8) {
-            environment["CODEX_BIN"] = executable.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        environment["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", environment["PATH"] ?? "/usr/bin:/bin"]
-            .joined(separator: ":")
-        process.environment = environment
+        let recordedPath = Bundle.main.url(forResource: "codex-path", withExtension: "txt")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        process.environment = launchEnvironment(ProcessInfo.processInfo.environment, recordedPath: recordedPath)
 
         let output = Pipe()
         let errors = Pipe()
