@@ -1,9 +1,7 @@
 import AppKit
-
-struct UsageSnapshot: Decodable {
-    let title: String
-    let details: [String]
-}
+#if WIDGET_ENABLED
+import WidgetKit
+#endif
 
 enum UsageReader {
     static func read() throws -> UsageSnapshot {
@@ -65,12 +63,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastUpdated: Date?
     private var refreshError: String?
     private var refreshing = false
+    #if WIDGET_ENABLED
+    private var widgetError: String?
+    private var publishedCache: WidgetCache?
+    private var lastWidgetReload: Date?
+    private var widgetReloadRequested = false
+    #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        #if WIDGET_ENABLED
+        if let url = try? WidgetStore.sharedURL(), let cache = WidgetStore.read(from: url) {
+            snapshot = cache.snapshot
+            lastUpdated = cache.updatedAt
+        }
+        #endif
         refresh()
-        let timer = Timer(timeInterval: 60, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
+        let timer = Timer(timeInterval: 60, target: self, selector: #selector(scheduledRefresh), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -79,7 +89,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refresh() {
-        guard !refreshing else { return }
+        #if WIDGET_ENABLED
+        // Keep a manual request pending if a scheduled fetch is already running.
+        widgetReloadRequested = true
+        #endif
+        performRefresh()
+    }
+
+    @objc private func scheduledRefresh() {
+        performRefresh()
+    }
+
+    private func performRefresh() {
+        // A cold-launch URL can arrive before applicationDidFinishLaunching.
+        // Its unconditional refresh will service the request after setup.
+        guard statusItem != nil, !refreshing else { return }
         refreshing = true
         render()
         DispatchQueue.global(qos: .utility).async {
@@ -94,10 +118,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .failure(let error):
                     self.refreshError = error.localizedDescription
                 }
+                #if WIDGET_ENABLED
+                self.publishWidget()
+                #endif
                 self.render()
             }
         }
     }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: { $0.scheme == "aiusage" && $0.host == "refresh" }) {
+            refresh()
+        }
+    }
+
+    #if WIDGET_ENABLED
+    private func publishWidget() {
+        let cache = WidgetCache(snapshot: snapshot, updatedAt: lastUpdated, refreshFailed: refreshError != nil)
+        do {
+            try WidgetStore.write(cache, to: WidgetStore.sharedURL())
+            let now = Date()
+            if cache.needsReload(comparedTo: publishedCache, at: now, lastReload: lastWidgetReload,
+                                 force: widgetReloadRequested) {
+                WidgetCenter.shared.reloadTimelines(ofKind: WidgetCache.kind)
+                lastWidgetReload = now
+            }
+            widgetReloadRequested = false
+            publishedCache = cache
+            widgetError = nil
+        } catch {
+            widgetError = error.localizedDescription
+        }
+    }
+    #endif
 
     private func render() {
         let title = snapshot?.title ?? (refreshing ? "AI …" : "AI unavailable")
@@ -128,6 +181,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.toolTip = refreshError
             addAction("Show Error…", action: #selector(showError), to: menu)
         }
+        #if WIDGET_ENABLED
+        if let widgetError {
+            addInfo("Widget sync failed", to: menu).toolTip = widgetError
+        }
+        #endif
         let refreshItem = addAction(refreshing ? "Refreshing…" : "Refresh Now", action: #selector(refresh), to: menu)
         refreshItem.isEnabled = !refreshing
         menu.addItem(.separator())
@@ -166,8 +224,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let application = NSApplication.shared
-let delegate = AppDelegate()
-application.delegate = delegate
-application.setActivationPolicy(.accessory)
-application.run()
+#if !APP_DELEGATE_TESTING
+@main
+enum AIUsageApp {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.accessory)
+        application.run()
+        withExtendedLifetime(delegate) {}
+    }
+}
+#endif

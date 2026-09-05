@@ -163,7 +163,21 @@ fn menu_bar_snapshot(bucket: &Value) -> Value {
             format_window(five_hour, "5-hour", &Local),
             format_window(weekly, "Weekly", &Local),
         ],
+        "fiveHour": widget_window(five_hour),
+        "weekly": widget_window(weekly),
     })
+}
+
+fn widget_window(window: Option<&Value>) -> Value {
+    let remaining = window
+        .and_then(|value| value.get("usedPercent"))
+        .and_then(Value::as_f64)
+        .map(|used| (100.0 - used).clamp(0.0, 100.0));
+    let resets_at = window
+        .and_then(|value| value.get("resetsAt"))
+        .and_then(Value::as_i64)
+        .filter(|seconds| DateTime::<Utc>::from_timestamp(*seconds, 0).is_some());
+    json!({ "remainingPercent": remaining, "resetsAt": resets_at })
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -192,6 +206,34 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn widget_windows_use_numeric_values_and_preserve_unknown_fields() {
+        let snapshot = menu_bar_snapshot(&json!({
+            "primary": {"windowDurationMins": 10080, "usedPercent": 110, "resetsAt": 1234},
+            "secondary": {"windowDurationMins": 300, "usedPercent": 12.34}
+        }));
+        assert_eq!(
+            snapshot["weekly"],
+            json!({"remainingPercent": 0.0, "resetsAt": 1234})
+        );
+        assert_eq!(
+            snapshot["fiveHour"],
+            json!({"remainingPercent": 87.66, "resetsAt": null})
+        );
+        assert_eq!(
+            widget_window(None),
+            json!({"remainingPercent": null, "resetsAt": null})
+        );
+        assert_eq!(
+            widget_window(Some(&json!({"usedPercent": "0", "resetsAt": i64::MAX}))),
+            json!({"remainingPercent": null, "resetsAt": null})
+        );
+        assert_eq!(
+            widget_window(Some(&json!({"usedPercent": -10, "resetsAt": 0}))),
+            json!({"remainingPercent": 100.0, "resetsAt": 0})
+        );
+    }
 
     #[test]
     fn menu_bar_shows_remaining_usage_and_matches_cli_details() {
